@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>城市环形公路 · 骑行</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #8ea893;
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  }
+  #scene { display: block; width: 100%; height: 100%; }
+
+  #hud {
+    position: fixed; top: 22px; left: 22px;
+    display: flex; flex-direction: column; gap: 8px;
+    padding: 16px 24px 18px;
+    border-radius: 16px;
+    background: rgba(18, 30, 38, 0.55);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.18);
+    color: #eef6f8;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.28);
+    user-select: none;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .hud-title {
+    font-size: 12px; letter-spacing: 4px;
+    color: rgba(180, 220, 235, 0.6);
+    margin-bottom: 4px;
+  }
+  .hud-row { display: flex; align-items: baseline; gap: 10px; }
+  .hud-label { font-size: 13px; letter-spacing: 2px; color: rgba(220,240,246,0.72); }
+  .hud-value {
+    font-size: 27px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 1px;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.35);
+  }
+  .hud-unit { font-size: 13px; color: rgba(220,240,246,0.7); }
+</style>
+</head>
+<body>
+
+<canvas id="scene"></canvas>
+
+<div id="hud">
+  <div class="hud-title">骑 行 数 据</div>
+  <div class="hud-row">
+    <span class="hud-label">圈数</span>
+    <span class="hud-value" id="laps">0</span>
+  </div>
+  <div class="hud-row">
+    <span class="hud-label">里程</span>
+    <span class="hud-value" id="dist">0.00</span>
+    <span class="hud-unit">km</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ========================= 基础设置 ========================= */
+  const canvas = document.getElementById('scene');
+  const ctx = canvas.getContext('2d');
+  const lapsEl = document.getElementById('laps');
+  const distEl = document.getElementById('dist');
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+
+  const WALLS      = ['#cfc6b4','#dcd3c2','#bfc7cc','#c9bfae','#d5d9db','#b9c3bd','#e0d8c6','#b4b0a8'];
+  const CAR_COLORS = ['#d94f3d','#3b7dd8','#2fa36b','#e8b73a','#8a5cd1','#e8e6e0','#2d3b45','#e07b2f'];
+  const PED_COLORS = ['#2f6fb5','#d9534f','#3f9e6b','#e0a13a','#7a5bd1','#c94f8b'];
+  const FLOWER_COLORS = ['#f5d74a','#f28fb0','#ffffff','#ec6b46','#c9a0f0','#ffd9e8'];
+
+  let W = 0, H = 0, cx = 0, cy = 0, R = 0, roadW = 60, ROAD_PX = 76;
+
+  const verticalRoads = [];
+  let buildings = [];
+  let cars = [];
+  let peds = [];
+  let clouds = [];
+  let flowers = [];
+
+  const state = {
+    t: 0,
+    angle: -Math.PI / 2,
+    totalAngle: 0,
+    dist: 0,
+    speed: 78,
+    lapMeters: 250,
+    laps: 0
+  };
+
+  /* ========================= 辅助函数 ========================= */
+  function rr(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  /* ========================= 初始化 ========================= */
+  function init() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+
+    canvas.width  = Math.floor(W * dpr);
+    canvas.height = Math.floor(H * dpr);
+    canvas.style.width  = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    cx = W / 2;
+    cy = H / 2;
+
+    ROAD_PX = Math.max(46, Math.min(78, W * 0.055));
+    roadW   = Math.max(46, Math.min(W, H) * 0.095);
+    R       = Math.min(W * 0.245, H * 0.33);
+
+    /* 三条纵向公路：左侧 1 条，右侧 2 条 */
+    verticalRoads.length = 0;
+    verticalRoads.push({ x: W * 0.130 });
+    verticalRoads.push({ x: W * 0.845 });
+    verticalRoads.push({ x: W * 0.945 });
+
+    generateBuildings();
+    generateFlowers();
+    generateCars();
+    generatePeds();
+    generateClouds();
+  }
+
+  /* ========================= 城市建筑生成 ========================= */
+  function generateBuildings() {
+    buildings = [];
+    const bands = verticalRoads.map(r => ({
+      x1: r.x - ROAD_PX / 2 - 28,
+      x2: r.x + ROAD_PX / 2 + 28
+    }));
+
+    const target = Math.round(W * H / 30000);
+    let guard = 0;
+
+    while (buildings.length < target && guard++ < 4000) {
+      const bw = rand(52, 132);
+      const bh = rand(52, 132);
+      const x = rand(10, Math.max(12, W - bw - 10));
+      const y = rand(10, Math.max(12, H - bh - 10));
+      const bcx = x + bw / 2;
+      const bcy = y + bh / 2;
+
+      /* 避开环形公路 */
+      if (Math.hypot(bcx - cx, bcy - cy) < R + roadW / 2 + 34 + Math.max(bw, bh) / 2) continue;
+
+      /* 避开纵向公路 */
+      let ok = true;
+      for (const b of bands) {
+        if (x < b.x2 && x + bw > b.x1) { ok = false; break; }
+      }
+      if (!ok) continue;
+
+      /* 避开其它建筑 */
+      for (const o of buildings) {
+        if (x < o.x + o.w + 14 && x + bw + 14 > o.x &&
+            y < o.y + o.h + 14 && y + bh + 14 > o.y) { ok = false; break; }
+      }
+      if (!ok) continue;
+
+      const color = pick(WALLS);
+      buildings.push({
+        x, y, w: bw, h: bh,
+        color,
+        roof: shade(color, -16),
+        inner: shade(color, 12),
+        deco: Math.random() < 0.55
+      });
+    }
+  }
+
+  function shade(hex, amt) {
+    const n = parseInt(hex.slice(1), 16);
+    let r = (n >> 16) + amt;
+    let g = ((n >> 8) & 0xff) + amt;
+    let b = (n & 0xff) + amt;
+    r = Math.max(0, Math.min(255, r));
+    g = Math.max(0, Math.min(255, g));
+    b = Math.max(0, Math.min(255, b));
+    return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+  }
+
+  /* ========================= 花坛中的花 ========================= */
+  function generateFlowers() {
+    flowers = [];
+    const gr = R - roadW / 2 - 4;
+    for (let i = 0; i < 220; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = gr * (0.76 + Math.random() * 0.19);
+      flowers.push({
+        a, d,
+        r: rand(1.4, 3.0),
+        c: pick(FLOWER_COLORS)
+      });
+    }
+  }
+
+  /* ========================= 交通工具 ========================= */
+  function generateCars() {
+    cars = [];
+    verticalRoads.forEach(road => {
+      const n = 3;
+      for (let i = 0; i < n; i++) {
+        const y = -260 + (i + Math.random() * 0.7) * ((H + 520) / n);
+        cars.push(makeCar(road, y));
+      }
+    });
+  }
+
+  function makeCar(road, y) {
+    const isBus = Math.random() < 0.22;
+    const w = isBus ? rand(34, 42) : rand(26, 34);
+    const h = isBus ? rand(82, 104) : rand(46, 62);
+    const lane = (Math.random() < 0.5 ? -1 : 1) * (ROAD_PX * 0.22);
+    return {
+      x: road.x + lane,
+      y: y,
+      w, h, isBus,
+      speed: rand(58, 118),
+      color: isBus ? pick(['#e8b73a', '#3b7dd8', '#2fa36b']) : pick(CAR_COLORS)
+    };
+  }
+
+  /* ========================= 行人 ========================= */
+  function generatePeds() {
+    peds = [];
+    verticalRoads.forEach(road => {
+      [-1, 1].forEach(side => {
+        const n = 2;
+        for (let i = 0; i < n; i++) {
+          peds.push({
+            x: road.x + side * (ROAD_PX / 2 + 10 + Math.random() * 4),
+            y: rand(-H, H),
+            speed: rand(22, 44),
+            color: pick(PED_COLORS),
+            phase: Math.random() * Math.PI * 2
+          });
+        }
+      });
+    });
+  }
+
+  /* ========================= 云 ========================= */
+  function generateClouds() {
+    clouds = [];
+    for (let i = 0; i < 10; i++) {
+      clouds.push({
+        x: rand(-260, W + 260),
+        y: rand(-140, H + 140),
+        r: rand(80, 175),
+        speed: rand(7, 20),
+        a: rand(0.10, 0.22)
+      });
+    }
+  }
+
+  /* ========================= 更新 ========================= */
+  function update(dt) {
+    state.t += dt;
+
+    /* 自行车绕圈 */
+    const dA = (state.speed * dt) / R;
+    state.angle += dA;
+    state.totalAngle += dA;
+    state.dist += (dA / (Math.PI * 2)) * state.lapMeters;
+    state.laps = Math.floor(state.totalAngle / (Math.PI * 2));
+
+    /* 车辆向下循环 */
+    for (const c of cars) {
+      c.y += c.speed * dt;
+      if (c.y > H + 180) {
+        c.y = -180 - Math.random() * 320;
+        c.speed = rand(58, 118);
+        c.color = c.isBus ? pick(['#e8b73a', '#3b7dd8', '#2fa36b']) : pick(CAR_COLORS);
+      }
+    }
+
+    /* 行人向下循环 */
+    for (const p of peds) {
+      p.y += p.speed * dt;
+      if (p.y > H + 50) {
+        p.y = -50 - Math.random() * 160;
+        p.speed = rand(22, 44);
+      }
+    }
+
+    /* 云飘动 */
+    for (const c of clouds) {
+      c.x += c.speed * dt;
+      if (c.x - c.r * 2 > W + 200) {
+        c.x = -c.r * 2 - 200;
+        c.y = rand(-140, H + 140);
+      }
+    }
+
+    /* 左上角数据 */
+    lapsEl.textContent = state.laps;
+    distEl.textContent = (state.dist / 1000).toFixed(2);
+  }
+
+  /* ========================= 绘制：地面 ========================= */
+  function drawGround() {
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.8);
+    g.addColorStop(0, '#a9bda1');
+    g.addColorStop(1, '#8ba18d');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  /* ========================= 绘制：纵向公路 ========================= */
+  function drawVerticalRoad(road) {
+    const halfW = ROAD_PX / 2;
+
+    /* 人行道 */
+    ctx.fillStyle = '#c3c0b5';
+    ctx.fillRect(road.x - halfW - 20, 0, 20, H);
+    ctx.fillRect(road.x + halfW, 0, 20, H);
+
+    /* 路缘石 */
+    ctx.fillStyle = '#a7a498';
+    ctx.fillRect(road.x - halfW - 22, 0, 2.5, H);
+    ctx.fillRect(road.x + halfW + 19.5, 0, 2.5, H);
+
+    /* 沥青 */
+    ctx.fillStyle = '#5b5f66';
+    ctx.fillRect(road.x - halfW, 0, ROAD_PX, H);
+
+    /* 中央虚线 */
+    ctx.setLineDash([26, 22]);
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = 'rgba(250,250,240,0.72)';
+    ctx.beginPath();
+    ctx.moveTo(road.x, 0);
+    ctx.lineTo(road.x, H);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    /* 边线 */
+    ctx.strokeStyle = 'rgba(240,240,230,0.4)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(road.x - halfW + 4, 0); ctx.lineTo(road.x - halfW + 4, H);
+    ctx.moveTo(road.x + halfW - 4, 0); ctx.lineTo(road.x + halfW - 4, H);
+    ctx.stroke();
+  }
+
+  /* ========================= 绘制：建筑 ========================= */
+  function drawBuilding(b) {
+    /* 投影 */
+    ctx.fillStyle = 'rgba(25, 35, 40, 0.20)';
+    rr(b.x + 9, b.y + 11, b.w, b.h, 6);
+    ctx.fill();
+
+    /* 墙体 */
+    ctx.fillStyle = b.color;
+    rr(b.x, b.y, b.w, b.h, 6);
+    ctx.fill();
+
+    /* 屋顶 */
+    ctx.fillStyle = b.roof;
+    rr(b.x + 9, b.y + 9, b.w - 18, b.h - 18, 4);
+    ctx.fill();
+
+    /* 屋顶高光 */
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    rr(b.x + 14, b.y + 14, b.w - 28, (b.h - 28) * 0.45, 3);
+    ctx.fill();
+
+    /* 屋顶设备 */
+    if (b.deco && b.w > 72 && b.h > 72) {
+      ctx.fillStyle = 'rgba(255,255,255,0.42)';
+      rr(b.x + b.w - 36, b.y + b.h - 36, 18, 18, 3);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,0.12)';
+      rr(b.x + 20, b.y + 20, 14, 14, 3);
+      ctx.fill();
+    }
+
+    /* 描边 */
+    ctx.strokeStyle = 'rgba(70, 70, 70, 0.22)';
+    ctx.lineWidth = 1.5;
+    rr(b.x + 0.75, b.y + 0.75, b.w - 1.5, b.h - 1.5, 6);
+    ctx.stroke();
+  }
+
+  /* ========================= 绘制：环形公路 ========================= */
+  function drawRing() {
+    const outer = R + roadW / 2;
+    const inner = R - roadW / 2;
+
+    /* 外圈路肩 */
+    ctx.beginPath();
+    ctx.arc(cx, cy, outer + 16, 0, Math.PI * 2);
+    ctx.fillStyle = '#b8b5a9';
+    ctx.fill();
+
+    /* 沥青 */
+    ctx.beginPath();
+    ctx.arc(cx, cy, outer, 0, Math.PI * 2);
+    ctx.fillStyle = '#5b5f66';
+    ctx.fill();
+
+    /* 内圈绿地底色（花坛在 drawGarden 中绘制） */
+    ctx.beginPath();
+    ctx.arc(cx, cy, inner, 0, Math.PI * 2);
+    ctx.fillStyle = '#7fae72';
+    ctx.fill();
+
+    /* 边线 */
+    ctx.strokeStyle = 'rgba(240,240,230,0.6)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(cx, cy, outer - 5, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, inner + 5, 0, Math.PI * 2); ctx.stroke();
+
+    /* 中央虚线 */
+    ctx.setLineDash([16, 16]);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(250,250,240,0.85)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  /* ========================= 绘制：中央喷水花坛 ========================= */
+  function drawGarden() {
+    const gr = R - roadW / 2 - 4;
+
+    /* 草地 */
+    ctx.beginPath();
+    ctx.arc(cx, cy, gr, 0, Math.PI * 2);
+    ctx.fillStyle = '#84b477';
+    ctx.fill();
+
+    /* 明暗过渡 */
+    const gg = ctx.createRadialGradient(cx, cy, gr * 0.2, cx, cy, gr);
+    gg.addColorStop(0, 'rgba(255,255,255,0.13)');
+    gg.addColorStop(1, 'rgba(0,0,0,0.13)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, gr, 0, Math.PI * 2);
+    ctx.fillStyle = gg;
+    ctx.fill();
+
+    /* 花朵 */
+    for (const f of flowers) {
+      const fx = cx + Math.cos(f.a) * f.d;
+      const fy = cy + Math.sin(f.a) * f.d;
+      ctx.beginPath();
+      ctx.arc(fx, fy, f.r, 0, Math.PI * 2);
+      ctx.fillStyle = f.c;
+      ctx.fill();
+    }
+
+    /* 水池 */
+    const poolR = gr * 0.44;
+    const pg = ctx.createRadialGradient(
+      cx - poolR * 0.35, cy - poolR * 0.35, poolR * 0.12,
+      cx, cy, poolR
+    );
+    pg.addColorStop(0, '#c9ecfa');
+    pg.addColorStop(0.55, '#79c3e0');
+    pg.addColorStop(1, '#3f8fb8');
+    ctx.beginPath();
+    ctx.arc(cx, cy, poolR, 0, Math.PI * 2);
+    ctx.fillStyle = pg;
+    ctx.fill();
+
+    /* 池边 */
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = '#d8d3c6';
+    ctx.stroke();
+
+    /* 水波扩散 */
+    const wave = ((state.t * 0.55) % 1);
+    ctx.globalAlpha = 0.35 * (1 - wave);
+    ctx.beginPath();
+    ctx.arc(cx, cy, poolR * (0.25 + wave * 0.7), 0, Math.PI * 2);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    /* 喷出的水珠 */
+    for (let i = 0; i < 52; i++) {
+      const p = (state.t * 0.85 + i * 0.137) % 1;
+      const ang = i * 2.399963;
+      const d = p * poolR * 0.95;
+      ctx.globalAlpha = (1 - p) * 0.9;
+      ctx.beginPath();
+      ctx.arc(
+        cx + Math.cos(ang) * d,
+        cy + Math.sin(ang) * d,
+        2.7 * (1 - p * 0.55), 0, Math.PI * 2
+      );
+      ctx.fillStyle = '#eaf8ff';
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    /* 中心白色水柱亮点 */
+    ctx.beginPath();
+    ctx.arc(cx, cy, poolR * 0.13, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fill();
+  }
+
+  /* ========================= 绘制：汽车 / 公交车 ========================= */
+  function drawCar(c) {
+    const hw = c.w / 2;
+    const hh = c.h / 2;
+
+    /* 影子 */
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
+    rr(c.x - hw + 3, c.y - hh + 5, c.w, c.h, 7);
+    ctx.fill();
+
+    /* 车身 */
+    ctx.fillStyle = c.color;
+    rr(c.x - hw, c.y - hh, c.w, c.h, 7);
+    ctx.fill();
+
+    /* 车顶 / 车窗 */
+    ctx.fillStyle = 'rgba(30, 45, 55, 0.42)';
+    rr(c.x - hw + 4, c.y - hh + 6, c.w - 8, c.h * 0.28, 4);
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(190, 225, 245, 0.75)';
+    rr(c.x - hw + 4, c.y - hh + 8, c.w - 8, c.h * 0.16, 3);
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(190, 225, 245, 0.65)';
+    rr(c.x - hw + 4, c.y + hh - 12 - c.h * 0.14, c.w - 8, c.h * 0.14, 3);
+    ctx.fill();
+
+    if (c.isBus) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.lineWidth = 1.5;
+      for (let i = 1; i < 4; i++) {
+        const yy = c.y - hh + (c.h / 4) * i;
+        ctx.beginPath();
+        ctx.moveTo(c.x - hw + 5, yy);
+        ctx.lineTo(c.x + hw - 5, yy);
+        ctx.stroke();
+      }
+    }
+  }
+
+  /* ========================= 绘制：行人 ========================= */
+  function drawPed(p) {
+    const bob = Math.sin(state.t * 9 + p.phase) * 1.3;
+    const x = p.x;
+    const y = p.y + bob;
+
+    /* 影子 */
+    ctx.fillStyle = 'rgba(0,0,0,0.20)';
+    ctx.beginPath();
+    ctx.ellipse(x + 2, y + 4, 5, 7.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    /* 身体（俯视） */
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.ellipse(x, y, 4.6, 6.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    /* 头部 */
+    ctx.fillStyle = '#3b2f26';
+    ctx.beginPath();
+    ctx.arc(x, y - 2.5, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /* ========================= 绘制：自行车 ========================= */
+  function drawBike() {
+    const a = state.angle;
+    const bx = cx + Math.cos(a) * R;
+    const by = cy + Math.sin(a) * R;
+    const heading = a + Math.PI / 2;
+
+    ctx.save();
+    ctx.translate(bx, by);
+    ctx.rotate(heading);
+    ctx.scale(0.88, 0.88);
+
+    /* 影子 */
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(2, 5, 22, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    /* 车轮 */
+    ctx.strokeStyle = '#22262b';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(-13, 0, 6.5, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc( 13, 0, 6.5, 0, Math.PI * 2); ctx.stroke();
+
+    /* 车架 */
+    ctx.strokeStyle = '#e05a2b';
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-13, 0);
+    ctx.lineTo(13, 0);
+    ctx.stroke();
+
+    /* 骑手身体 */
+    ctx.fillStyle = '#2f6fb5';
+    ctx.beginPath();
+    ctx.ellipse(-1, 0, 8.5, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    /* 手臂（握把） */
+    ctx.strokeStyle = '#f0c9a4';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(2,  4); ctx.lineTo(11,  4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(2, -4); ctx.lineTo(11, -4); ctx.stroke();
+
+    /* 头部 */
+    ctx.fillStyle = '#f4cfa6';
+    ctx.beginPath();
+    ctx.arc(2, 0, 4.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    /* 头盔 */
+    ctx.fillStyle = '#f0c23c';
+    ctx.beginPath();
+    ctx.arc(1.5, 0, 3.1, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  /* ========================= 绘制：云 ========================= */
+  function cloudBlob(x, y, r) {
+    ctx.beginPath();
+    ctx.arc(x,           y,           r * 0.62, 0, Math.PI * 2);
+    ctx.arc(x + r * 0.6, y - r * 0.18, r * 0.48, 0, Math.PI * 2);
+    ctx.arc(x - r * 0.62, y + r * 0.05, r * 0.44, 0, Math.PI * 2);
+    ctx.arc(x + r * 0.15, y + r * 0.42, r * 0.42, 0, Math.PI * 2);
+    ctx.arc(x - r * 0.25, y - r * 0.42, r * 0.40, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawClouds() {
+    for (const c of clouds) {
+      /* 云影 */
+      ctx.globalAlpha = c.a * 0.5;
+      ctx.fillStyle = '#39494f';
+      cloudBlob(c.x + 45, c.y + 62, c.r);
+      ctx.globalAlpha = 1;
+
+      /* 云体 */
+      ctx.globalAlpha = c.a;
+      ctx.fillStyle = '#ffffff';
+      cloudBlob(c.x, c.y, c.r);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  /* ========================= 总渲染 ========================= */
+  function render() {
+    /* 地面 */
+    drawGround();
+
+    /* 纵向公路 */
+    for (const road of verticalRoads) drawVerticalRoad(road);
+
+    /* 城市建筑 */
+    for (const b of buildings) drawBuilding(b);
+
+    /* 环形公路 + 中央花坛 */
+    drawRing();
+    drawGarden();
+
+    /* 交通工具 */
+    for (const c of cars) drawCar(c);
+
+    /* 行人 */
+    for (const p of peds) drawPed(p);
+
+    /* 骑行者 */
+    drawBike();
+
+    /* 云（多云天气） */
+    drawClouds();
+
+    /* 顶部轻微压暗，增强氛围 */
+    const vg = ctx.createLinearGradient(0, 0, 0, H);
+    vg.addColorStop(0, 'rgba(60, 80, 95, 0.10)');
+    vg.addColorStop(0.35, 'rgba(60, 80, 95, 0)');
+    vg.addColorStop(1, 'rgba(30, 45, 55, 0.10)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  /* ========================= 主循环 ========================= */
+  let last = 0;
+  function loop(now) {
+    if (!last) last = now;
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05;   /* 防止切后台后跳帧 */
+
+    update(dt);
+    render();
+
+    requestAnimationFrame(loop);
+  }
+
+  /* ========================= 启动 ========================= */
+  let resizeTimer = null;
+  window.addEventListener('resize', function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(init, 150);
+  });
+
+  init();
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
